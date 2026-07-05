@@ -1,104 +1,110 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from math import exp, gamma, isclose
+from scipy.special import gamma
 
-# -------------------------------------------------
-# إعدادات المسألة (معامل التأخير a = 4/5)
-# -------------------------------------------------
-ratio = 4.0 / 5.0      # a = 4/5
-x_max = 10.0           # مجال الحل [0, 10]
-J      = 8             # مستوى الدقة (N = 2^(J+1) * x_max)
+def f_rhs(x):
+    return (0.32*x - 0.5)*np.exp(-0.8*x) + np.exp(-x)
 
-# -------------------------------------------------
-# الحل الدقيق للحالة α = 1
-# -------------------------------------------------
-def y_exact(x):
-    return x * np.exp(-x)
+def exact_solution(x):
+    return x*np.exp(-x)
 
-# -------------------------------------------------
-# معاملات مخطط L1 لمشتق كابوتو
-# -------------------------------------------------
-def L1_coeffs(N, alpha):
-    b = np.empty(N + 1)
-    b[0] = 0.0
-    for k in range(1, N + 1):
-        b[k] = k**(1 - alpha) - (k - 1)**(1 - alpha)
-    return b
+def caputo_matrix(points, alpha, N, L):
+    h = L / N
+    A = np.zeros((len(points), N))
 
-# -------------------------------------------------
-# محلّل المعادلة الكسرية المؤجلة
-# -------------------------------------------------
-def solve_pantograph(alpha, J, x_max=10.0):
-    """
-    يحلّ:
-        D^α y(x) - 0.5 D^α y(a x) = 0.1 y(a x) - y(x)
-                                     + (0.32 x - 0.5) e^{-0.8 x} + e^{-x},
-        مع y(0)=0، حيث a=4/5.
-    """
-    N = int(2 ** (J + 1) * x_max)  # عدد الفواصل
-    h = x_max / N
-    x_nodes = np.linspace(0.0, x_max, N + 1)
+    for r, x in enumerate(points):
+        if x <= 0:
+            continue
 
-    y      = np.zeros(N + 1)
-    dy_L1  = np.zeros(N + 1)       # تقريب D^α y
-    b      = L1_coeffs(N, alpha)
-    C      = h**(-alpha) / gamma(2 - alpha)
+        mmax = min(int(np.ceil(x / h)), N)
 
-    for n in range(1, N + 1):
-        xn = x_nodes[n]
+        for m in range(1, mmax + 1):
+            t0 = (m - 1) * h
+            t1 = m * h
 
-        # موضع التأخير a x
-        x_delay = ratio * xn
-        k  = int(np.floor(x_delay / h))
-        xk = k * h
+            if t0 >= x:
+                break
 
-        # استيفاء y و D^α y عند نقطة التأخير
-        if isclose(x_delay, xk) or k == N:
-            y_delay  = y[k]
-            dy_delay = dy_L1[k]
+            b = min(t1, x)
+
+            coeff = ((x - t0)**(1-alpha) - (x - b)**(1-alpha)) / (h * gamma(2-alpha))
+
+            A[r, m-1] += coeff
+
+            if m-2 >= 0:
+                A[r, m-2] -= coeff
+
+    return A
+
+def interpolation_matrix(points, N, L):
+    h = L / N
+    M = np.zeros((len(points), N))
+
+    for r, x in enumerate(points):
+        if x <= 0:
+            continue
+
+        if x >= L:
+            M[r, N-1] = 1.0
+            continue
+
+        k = int(np.floor(x / h))
+        theta = (x - k*h) / h
+
+        if k == 0:
+            M[r, 0] = theta
         else:
-            θ = (x_delay - xk) / h
-            y_delay  = y[k]  + θ * (y[k + 1]  - y[k])
-            dy_delay = dy_L1[k] + θ * (dy_L1[k + 1] - dy_L1[k])
+            M[r, k-1] = 1.0 - theta
+            M[r, k] = theta
 
-        # الطرف الأيمن
-        rhs = 0.1 * y_delay - y[n - 1] + (0.32 * xn - 0.5) * exp(-0.8 * xn) + exp(-xn)
+    return M
 
-        # تقريب المشتق الكسري عند xn
-        diff = y[1:n][::-1] - y[: n - 1][::-1] if n > 1 else np.array([])
-        prev_sum = np.dot(b[1:n], diff) if n > 1 else 0.0
-        dy = 0.5 * dy_delay + rhs
-        dy_L1[n] = dy
+def solve_fractional_pantograph(alpha, J, L):
+    N = 2**(J+1)
+    q = 4/5
 
-        # خطوة صريحة لتحديث y
-        y[n] = y[n - 1] + h * dy   # جيّد لـ α≈1
+    x_nodes = np.linspace(L/N, L, N)
+    q_nodes = q * x_nodes
 
-    return x_nodes, y
+    D_x = caputo_matrix(x_nodes, alpha, N, L)
+    D_q = caputo_matrix(q_nodes, alpha, N, L)
+    Y_q = interpolation_matrix(q_nodes, N, L)
 
-# -------------------------------------------------
-# حلّ واستخراج منحنيات لقيَم α مختلفة
-# -------------------------------------------------
-alphas = [0.6, 0.7, 0.8, 0.9]
-solutions = {}
+    I = np.eye(N)
 
-for a in alphas:
-    xg, yg = solve_pantograph(a, J, x_max)
-    solutions[a] = (xg, yg)
+    A = D_x - 0.5*D_q - 0.1*Y_q + I
+    b = f_rhs(x_nodes)
 
-# -------------------------------------------------
-# رسم المنحنيات
-# -------------------------------------------------
-x_exact = np.linspace(0.0, x_max, 2001)
-plt.figure(figsize=(10, 5))
-plt.plot(x_exact, y_exact(x_exact), label="Exact solution $y = xe^{-x}$")
+    y_nodes = np.linalg.solve(A, b)
 
-for a in alphas:
-    xg, yg = solutions[a]
-    plt.plot(xg, yg, label=f"Approximate solution $\\alpha = {a}$, $J = 8$")
+    x_full = np.concatenate(([0.0], x_nodes))
+    y_full = np.concatenate(([0.0], y_nodes))
 
-plt.title("Approximate Solutions on [0, 10] for $J = 8$")
-plt.xlabel("$x$")
-plt.ylabel("$y(x)$")
+    return x_full, y_full
+
+J = 8
+L = 10.0
+alphas = [0.7, 0.8, 0.9]
+
+x_plot = np.linspace(0, L, 2000)
+y_exact = exact_solution(x_plot)
+
+plt.figure(figsize=(9, 5.5))
+
+plt.plot(x_plot, y_exact, linewidth=2.5,
+         label=r'Exact solution $y=xe^{-x}$')
+
+for alpha in alphas:
+    x_alpha, y_alpha = solve_fractional_pantograph(alpha=alpha, J=J, L=L)
+    y_plot = np.interp(x_plot, x_alpha, y_alpha)
+
+    plt.plot(x_plot, y_plot, linewidth=2,
+             label=fr'Approximate solution $\alpha={alpha}$, $J=8$')
+
+plt.xlabel('x')
+plt.ylabel('y(x)')
+plt.title(r'Approximate Solutions on $[0,10]$ for $J=8$')
+plt.grid(True)
 plt.legend()
 plt.tight_layout()
 plt.show()
